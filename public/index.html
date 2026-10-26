@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#203b36">
+  <meta name="description" content="Jadwal kuliah, tugas, dan kas kelas dalam satu ruang.">
+  <title>Ruang kelas · administrasi kelas</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#content">Langsung ke konten</a>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#ringkasan" aria-label="Ruang kelas, beranda"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span>ruang kelas<span class="brand-caption">Ruang bersama, urusan beres.</span></span></a>
+      <div class="class-chip"><span class="class-avatar">rk</span><div><strong id="class-name">Kelas kita</strong><span id="semester">Semester aktif</span></div></div>
+      <p class="nav-label">Ruang bersama</p>
+      <nav aria-label="Menu utama">
+        <a href="#ringkasan" data-nav="ringkasan"><span class="nav-symbol" aria-hidden="true">▦</span>Ringkasan</a>
+        <a href="#tugas" data-nav="tugas"><span class="nav-symbol" aria-hidden="true">☷</span>Tugas<span id="task-count" class="nav-count">0</span></a>
+        <a href="#jadwal" data-nav="jadwal"><span class="nav-symbol" aria-hidden="true">▤</span>Jadwal kuliah</a>
+        <a href="#kas" data-nav="kas"><span class="nav-symbol" aria-hidden="true">▣</span>Kas kelas</a>
+        <div class="admin-nav" hidden>
+          <p class="nav-label">Kelola kelas</p>
+          <a href="#mahasiswa" data-nav="mahasiswa"><span class="nav-symbol" aria-hidden="true">◫</span>Mahasiswa</a>
+          <a href="#bot" data-nav="bot"><span class="nav-symbol" aria-hidden="true">◎</span>Bot WhatsApp</a>
+          <a href="#pengaturan" data-nav="pengaturan"><span class="nav-symbol" aria-hidden="true">⚙</span>Pengaturan</a>
+        </div>
+      </nav>
+      <div class="sidebar-bottom"><div class="sidebar-note"><span class="note-line"></span><p>Lebih sedikit yang terlewat.<br>Lebih banyak yang beres.</p></div><button id="auth-button" class="account-button" data-action="login"><span class="account-avatar">a</span><span><strong>Masuk sebagai admin</strong><small>Kelola data kelas</small></span><span aria-hidden="true">↗</span></button></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><button class="menu-button button ghost" id="mobile-menu" aria-label="Buka menu" aria-expanded="false">☰</button><div class="breadcrumb">Ruang bersama <span>/</span> <strong id="breadcrumb-page">Ringkasan</strong></div><div class="topbar-right"><span id="today-label" class="today-label"></span><span class="viewer-label" id="viewer-label">Akses mahasiswa</span></div></header>
+      <main id="content" tabindex="-1"><div class="loading-state" role="status">Menyiapkan ruang kelas…</div></main>
+      <footer class="footer"><span>ruang kelas <span class="footer-dot">·</span> Satu tempat untuk urusan kelas.</span><span>Seluruh waktu dalam WIB</span></footer>
+    </div>
+  </div>
+  <dialog id="modal" aria-labelledby="modal-title"><div id="modal-content"></div></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
