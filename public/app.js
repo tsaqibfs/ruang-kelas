@@ -8,6 +8,43 @@ const modal = document.querySelector('#modal');
 const routeNames = { ringkasan: 'Ringkasan', tugas: 'Tugas', jadwal: 'Jadwal kuliah', kas: 'Kas kelas', mahasiswa: 'Mahasiswa', bot: 'Bot WhatsApp', pengaturan: 'Pengaturan' };
 const adminPages = ['mahasiswa', 'bot', 'pengaturan'];
 let toastTimer;
+let groupRequest = null;
+let groupGeneration = 0;
+let groupsUpdatedAt = 0;
+let pollingBot = false;
+function invalidateGroups() {
+  groupGeneration++;
+  groupRequest = null;
+  state.groups = null;
+  groupsUpdatedAt = 0;
+  populateGroups();
+}
+function groupHint(message, error = false) {
+  const select = document.querySelector('#group-select');
+  if (!select) return;
+  let hint = document.querySelector('#group-hint');
+  if (!hint) { hint = document.createElement('p'); hint.id = 'group-hint'; hint.setAttribute('role', 'status'); select.closest('label').after(hint); }
+  hint.className = error ? 'form-error' : 'helper-text';
+  hint.textContent = message;
+}
+async function refreshGroups() {
+  if (groupRequest) return groupRequest;
+  const generation = groupGeneration;
+  groupHint('Memuat grup dari WhatsApp…');
+  const pending = request('/api/bot/groups').then(groups => {
+    if (generation !== groupGeneration || !state.session.authenticated || state.admin?.bot.status !== 'ready') return;
+    state.groups = groups;
+    groupsUpdatedAt = Date.now();
+    populateGroups();
+    groupHint(groups.length ? `${groups.length} grup tersedia. Pilih lalu simpan tujuan.` : 'Belum ada grup tersinkron. Daftar akan dimuat ulang otomatis; pastikan akun ini sudah bergabung ke grup kelas.');
+    return groups;
+  }).catch(error => {
+    if (generation === groupGeneration) groupHint(`Gagal memuat grup: ${error.message} Akan dicoba lagi otomatis.`, true);
+    throw error;
+  }).finally(() => { if (groupRequest === pending) groupRequest = null; });
+  groupRequest = pending;
+  return pending;
+}
 function toast(message, error = false) {
   const node = document.querySelector('#toast');
   node.textContent = message; node.hidden = false; node.classList.toggle('error', error);
@@ -24,7 +61,7 @@ async function load() {
   const admin = session.authenticated ? await request('/api/admin') : null;
   state.data = data; state.session = session; state.admin = admin;
   if (!state.period) state.period = data.clock.period;
-  if (!session.authenticated) { state.groups = null; state.cashTab = 'ledger'; }
+  if (!session.authenticated) { invalidateGroups(); state.cashTab = 'ledger'; }
   renderShell(); render();
 }
 function renderShell() {
@@ -45,7 +82,10 @@ function render() {
   } else {
     const renderers = { ringkasan: overview, tugas: tasks, jadwal: schedule, kas: cash, mahasiswa: students, bot: botView, pengaturan: settings };
     content.innerHTML = (renderers[state.page] || overview)(state);
-    if (state.page === 'bot' && state.groups) populateGroups();
+    if (state.page === 'bot') {
+      populateGroups();
+      if (state.admin.bot.status === 'ready') refreshGroups().catch(() => {});
+    }
   }
   document.querySelectorAll('[data-nav]').forEach(node => { const active = node.dataset.nav === state.page; node.classList.toggle('active', active); if (active) node.setAttribute('aria-current', 'page'); else node.removeAttribute('aria-current'); });
   document.querySelector('#breadcrumb-page').textContent = routeNames[state.page] || 'Ringkasan';
@@ -109,9 +149,9 @@ document.addEventListener('click', event => {
     else if (action === 'confirm-delete') { await request(`/api/${entity}/${id}`, { method: 'DELETE', body: {} }); modal.close(); await load(); toast('Data berhasil dihapus.'); }
     else if (action === 'toggle-task') { const task = findItem('tasks', id); await request(`/api/tasks/${id}`, { method: 'PUT', body: { ...task, done: !task.done } }); await load(); toast(task.done ? 'Tugas dibuka kembali.' : 'Tugas ditutup. Pengingat dihentikan.'); }
     else if (action === 'refresh') { await load(); toast('Data sudah diperbarui.'); }
-    else if (action === 'connect') { const bot = await request('/api/bot/connect', { method: 'POST', body: {} }); state.admin.bot = bot; state.groups = null; render(); toast('Menyiapkan koneksi WhatsApp.'); }
-    else if (action === 'disconnect') { state.admin.bot = await request('/api/bot/disconnect', { method: 'POST', body: {} }); await load(); toast('Koneksi dan pengingat otomatis dihentikan. Sesi pasangan tetap tersimpan.'); }
-    else if (action === 'groups') { if (state.admin.bot.status !== 'ready') throw new Error('Hubungkan WhatsApp terlebih dahulu.'); state.groups = await request('/api/bot/groups'); populateGroups(); toast(`${state.groups.length} grup tersedia.`); }
+    else if (action === 'connect') { invalidateGroups(); const bot = await request('/api/bot/connect', { method: 'POST', body: {} }); state.admin.bot = bot; render(); toast('Menyiapkan koneksi WhatsApp.'); }
+    else if (action === 'disconnect') { invalidateGroups(); state.admin.bot = await request('/api/bot/disconnect', { method: 'POST', body: {} }); await load(); toast('Koneksi dan pengingat otomatis dihentikan. Sesi pasangan tetap tersimpan.'); }
+    else if (action === 'groups') { if (state.admin.bot.status !== 'ready') throw new Error('Hubungkan WhatsApp terlebih dahulu.'); await refreshGroups(); }
     else if (action === 'preview') {
       const preview = await request('/api/bot/preview');
       openModal(`<div class="modal-heading"><div><p class="eyebrow">Sebelum dikirim</p><h2 id="modal-title">Pratinjau jadwal besok</h2></div><button class="close-button" data-action="close" aria-label="Tutup">×</button></div><pre class="message-preview">${e(preview.schedule)}</pre><p class="helper-text">Pesan akan dikirim ke grup yang tersimpan pada pengaturan bot. Pengiriman manual terpisah dari jadwal otomatis.</p>${preview.due.filter(j => j.kind !== 'schedule').length ? `<details><summary>Pengingat tugas / kas yang jatuh tempo</summary>${preview.due.filter(j => j.kind !== 'schedule').map(j => `<pre class="message-preview">${e(j.message)}</pre>`).join('')}</details>` : ''}<p class="form-error" id="form-error" role="alert" hidden></p><div class="modal-actions"><button class="button secondary" data-action="close">Tutup</button><button class="button primary" data-action="announce" ${state.admin.bot.status !== 'ready' || !state.admin.settings.groupId ? 'disabled' : ''}>Kirim jadwal ke grup</button></div>`);
@@ -172,9 +212,24 @@ modal.addEventListener('click', event => { if (event.target === modal) { const r
 window.addEventListener('hashchange', route);
 window.addEventListener('keydown', event => { if (event.key === 'Escape') { document.querySelector('#sidebar').classList.remove('open'); document.querySelector('#mobile-menu').setAttribute('aria-expanded', 'false'); } });
 setInterval(async () => {
-  if (document.hidden || state.page !== 'bot' || !state.session.authenticated || modal.open) return;
-  try { const bot = await request('/api/bot/status'); state.admin.bot = bot; const node = document.querySelector('#bot-status'); if (node) node.innerHTML = botStatus(bot); }
+  if (pollingBot || document.hidden || state.page !== 'bot' || !state.session.authenticated || modal.open) return;
+  pollingBot = true;
+  try {
+    const bot = await request('/api/bot/status');
+    if (!state.session.authenticated || !state.admin) return;
+    const previous = state.admin.bot.status;
+    state.admin.bot = bot;
+    const node = document.querySelector('#bot-status'); if (node) node.innerHTML = botStatus(bot);
+    if (bot.status !== 'ready') {
+      if (previous === 'ready') invalidateGroups();
+      groupHint('Grup akan dimuat otomatis setelah WhatsApp terhubung.');
+    } else if (previous !== 'ready' || !state.groups?.length || Date.now() - groupsUpdatedAt >= 30000) {
+      if (previous !== 'ready') invalidateGroups();
+      await refreshGroups();
+    }
+  }
   catch (error) { if (error.status === 401) await load().catch(() => {}); }
+  finally { pollingBot = false; }
 }, 5000);
 setInterval(() => {
   if (!document.hidden && !modal.open && !['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(document.activeElement?.tagName) && !['pengaturan', 'bot'].includes(state.page)) load().catch(() => {});

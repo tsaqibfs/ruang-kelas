@@ -10,7 +10,10 @@ function deadline(promise, ms, label, uncertain = false) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 export class WhatsApp {
-  constructor(dataDir) {
+  constructor(dataDir, { createClient = options => new whatsapp.Client(options) } = {}) {
+    this.createClient = createClient;
+    this.operations = Promise.resolve();
+    this.initialization = null;
     this.dataDir = dataDir;
     this.client = null;
     this.status = 'disconnected';
@@ -23,43 +26,76 @@ export class WhatsApp {
   }
   snapshot() { return { status: this.status, qr: this.qr, error: this.error }; }
   isReady() { return this.status === 'ready'; }
-  async start() {
+  serialize(operation) {
+    const pending = this.operations.then(operation);
+    this.operations = pending.catch(() => {});
+    return pending;
+  }
+  start() { return this.serialize(() => this.startClient()); }
+  async disposeClient() {
+    const client = this.client;
+    if (!client) return;
+    this.stopping = true;
+    try {
+      // Wait for the actual browser process to exit before reusing LocalAuth's profile.
+      const process = client.pupBrowser?.process?.();
+      const exited = process && process.exitCode === null ? new Promise(resolve => process.once('exit', resolve)) : Promise.resolve();
+      await deadline(client.destroy(), 15000, 'Browser WhatsApp lama belum tertutup. Coba hubungkan lagi.');
+      if (this.initialization) await deadline(this.initialization, 15000, 'Inisialisasi WhatsApp lama belum berhenti. Coba lagi.');
+      // initialize() may have still been launching when destroy() was first called.
+      if (client.pupBrowser?.isConnected?.()) await deadline(client.destroy(), 15000, 'Browser WhatsApp belum tertutup.');
+      await deadline(exited, 15000, 'Proses browser WhatsApp belum berhenti. Coba lagi.');
+      this.client = null;
+      this.initialization = null;
+    } finally { this.stopping = false; }
+  }
+  async startClient() {
     this.desired = true;
     if (this.starting || this.stopping || ['starting', 'qr', 'ready'].includes(this.status)) return;
     this.starting = true;
     clearTimeout(this.reconnectTimer);
     try {
-      if (this.client) await this.client.destroy().catch(() => {});
+      await this.disposeClient();
       const paths = [process.env.CHROME_PATH, 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe'].filter(Boolean);
       const executablePath = paths.find(path => existsSync(path));
-      const client = new whatsapp.Client({ authStrategy: new whatsapp.LocalAuth({ dataPath: join(this.dataDir, 'whatsapp') }), puppeteer: { headless: true, ...(executablePath ? { executablePath } : {}) } });
+      const client = this.createClient({ authStrategy: new whatsapp.LocalAuth({ dataPath: join(this.dataDir, 'whatsapp') }), puppeteer: { headless: true, ...(executablePath ? { executablePath } : {}) } });
       this.client = client;
       this.status = 'starting'; this.qr = null; this.error = '';
       client.on('qr', async raw => {
-        try { const qr = await QRCode.toDataURL(raw, { width: 280, margin: 2 }); if (this.client === client && this.status !== 'ready') { this.qr = qr; this.status = 'qr'; } }
-        catch { this.error = 'Gagal membuat QR. Hubungkan ulang.'; }
+        try { const qr = await QRCode.toDataURL(raw, { width: 280, margin: 2 }); if (this.client === client && !this.stopping && this.status !== 'ready') { this.qr = qr; this.status = 'qr'; } }
+        catch { if (this.client === client && !this.stopping) this.error = 'Gagal membuat QR. Hubungkan ulang.'; }
       });
-      client.on('ready', () => { if (this.client === client) { this.status = 'ready'; this.qr = null; this.error = ''; } });
-      client.on('auth_failure', () => { this.status = 'error'; this.qr = null; this.error = 'Autentikasi WhatsApp gagal. Hubungkan ulang dan pindai QR baru.'; });
+      client.on('ready', () => { if (this.client === client && !this.stopping) { this.status = 'ready'; this.qr = null; this.error = ''; } });
+      client.on('auth_failure', () => { if (this.client !== client || this.stopping) return; this.status = 'error'; this.qr = null; this.error = 'Autentikasi WhatsApp gagal. Hubungkan ulang dan pindai QR baru.'; });
       client.on('disconnected', () => {
-        if (this.client !== client) return;
+        if (this.client !== client || this.stopping) return;
         this.status = 'disconnected'; this.qr = null;
         this.error = 'Koneksi WhatsApp terputus.';
-        if (this.desired && !this.stopping) this.reconnectTimer = setTimeout(() => { this.start().catch(() => {}); }, 30000);
+        clearTimeout(this.reconnectTimer);
+        if (this.desired) this.reconnectTimer = setTimeout(() => { this.start().catch(() => {}); }, 30000);
       });
       // QR scanning may take time; initialization continues outside the HTTP request.
-      client.initialize().catch(async error => {
-        if (this.client !== client) return;
+      this.initialization = Promise.resolve().then(() => client.initialize()).catch(error => {
+        if (this.client !== client || this.stopping) return;
         this.status = 'error'; this.qr = null;
         this.error = `Gagal membuka WhatsApp: ${String(error.message).slice(0, 300)}`;
-        await client.destroy().catch(() => {});
       });
+    } catch (error) {
+      this.status = 'error'; this.qr = null; this.error = error.message;
+      throw error;
     } finally { this.starting = false; }
   }
   async groups() {
-    if (!this.isReady()) return [];
-    const chats = await deadline(this.client.getChats(), 45000, 'Daftar grup belum tersedia. Coba lagi sebentar.');
-    return chats.filter(c => c.isGroup).map(c => ({ id: c.id._serialized, name: c.name })).sort((a, b) => a.name.localeCompare(b.name));
+    if (!this.isReady() || this.stopping) throw new Error('WhatsApp belum siap. Tunggu sampai terhubung.');
+    const client = this.client;
+    const chats = await deadline(client.getChats(), 45000, 'Daftar grup belum tersedia. Coba lagi sebentar.');
+    if (this.client !== client || !this.isReady() || this.stopping) throw new Error('Koneksi berubah saat memuat grup. Coba lagi.');
+    const groups = new Map();
+    for (const chat of chats) {
+      const id = chat.id?._serialized;
+      if (typeof id === 'string' && id.endsWith('@g.us')) groups.set(id, { id, name: chat.name || id });
+    }
+    return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
   async send(target, message) {
     if (!this.isReady()) throw new Error('WhatsApp belum terhubung.');
@@ -67,12 +103,13 @@ export class WhatsApp {
     await deadline(this.client.sendMessage(target, message), 60000, 'Hasil pengiriman belum pasti. Periksa grup sebelum mengirim ulang.', true);
     await delay(1500);
   }
-  async stop() {
-    this.desired = false; this.stopping = true;
-    clearTimeout(this.reconnectTimer);
-    const client = this.client;
-    this.client = null;
-    try { if (client) await deadline(client.destroy(), 10000, 'Browser WhatsApp belum tertutup.'); }
-    finally { this.status = 'disconnected'; this.qr = null; this.stopping = false; }
+  stop() {
+    return this.serialize(async () => {
+      this.desired = false;
+      clearTimeout(this.reconnectTimer);
+      this.status = 'disconnected'; this.qr = null;
+      try { await this.disposeClient(); this.error = ''; }
+      catch (error) { this.status = 'error'; this.error = error.message; throw error; }
+    });
   }
 }
