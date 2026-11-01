@@ -6,7 +6,8 @@ import { createApp } from '../src/app.js';
 test('API melindungi perubahan admin, bootstrap, CSRF dan menyembunyikan data mahasiswa dari publik', async () => {
   const store = new Store(':memory:');
   const bot = { snapshot: () => ({ status: 'disconnected', qr: 'rahasia' }), groups: async () => [], isReady: () => false };
-  const app = createApp({ store, bot, setupToken: 'token-lokal-panjang' });
+  const logs = [];
+  const app = createApp({ store, bot, setupToken: 'token-lokal-panjang', logError: (...args) => logs.push(args) });
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -32,6 +33,10 @@ test('API melindungi perubahan admin, bootstrap, CSRF dan menyembunyikan data ma
     assert.doesNotMatch(JSON.stringify(publicData), /Rahasia2026|rahasia/);
     assert.equal((await call('/api/admin')).status, 401);
     assert.equal((await call('/api/settings', 'PUT', { className: 'Bajak' }, { ...headers, Origin: 'https://jahat.example' })).status, 403);
+    bot.snapshot = () => { throw new Error('r'); };
+    assert.equal((await call('/api/bot/status', 'GET', undefined, headers)).status, 500);
+    assert.match(logs[0][0], /GET \/api\/bot\/status/);
+    assert.match(logs[0][1], /Error: r[\s\S]*api.test.js/);
     assert.equal((await call('/api/logout', 'POST', {}, headers)).status, 200);
     assert.equal((await call('/api/admin', 'GET', undefined, headers)).status, 401);
     assert.equal((await call('/api/login', 'POST', { username: 'admin', password: 'salah' })).status, 401);

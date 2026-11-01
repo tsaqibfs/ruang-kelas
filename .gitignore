@@ -5,3 +5,6 @@ backups/
 logs/
 .wwebjs_cache/
 *.zip
+docs/
+test/
+whatsapp/

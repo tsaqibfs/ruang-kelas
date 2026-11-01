@@ -11,12 +11,16 @@ let toastTimer;
 let groupRequest = null;
 let groupGeneration = 0;
 let groupsUpdatedAt = 0;
+let groupsRetryAt = 0;
+let groupFailures = 0;
 let pollingBot = false;
 function invalidateGroups() {
   groupGeneration++;
   groupRequest = null;
   state.groups = null;
   groupsUpdatedAt = 0;
+  groupsRetryAt = 0;
+  groupFailures = 0;
   populateGroups();
 }
 function groupHint(message, error = false) {
@@ -34,12 +38,19 @@ async function refreshGroups() {
   const pending = request('/api/bot/groups').then(groups => {
     if (generation !== groupGeneration || !state.session.authenticated || state.admin?.bot.status !== 'ready') return;
     state.groups = groups;
+    groupFailures = 0;
+    groupsRetryAt = Date.now() + (groups.length ? 30000 : 10000);
     groupsUpdatedAt = Date.now();
     populateGroups();
     groupHint(groups.length ? `${groups.length} grup tersedia. Pilih lalu simpan tujuan.` : 'Belum ada grup tersinkron. Daftar akan dimuat ulang otomatis; pastikan akun ini sudah bergabung ke grup kelas.');
     return groups;
   }).catch(error => {
-    if (generation === groupGeneration) groupHint(`Gagal memuat grup: ${error.message} Akan dicoba lagi otomatis.`, true);
+    if (generation === groupGeneration) {
+      groupFailures++;
+      const retryMs = Math.min(60000, 10000 * 2 ** Math.min(groupFailures - 1, 3));
+      groupsRetryAt = Date.now() + retryMs;
+      groupHint(`Gagal memuat grup: ${error.message} Dicoba lagi dalam ${retryMs / 1000} detik.`, true);
+    }
     throw error;
   }).finally(() => { if (groupRequest === pending) groupRequest = null; });
   groupRequest = pending;
@@ -223,7 +234,7 @@ setInterval(async () => {
     if (bot.status !== 'ready') {
       if (previous === 'ready') invalidateGroups();
       groupHint('Grup akan dimuat otomatis setelah WhatsApp terhubung.');
-    } else if (previous !== 'ready' || !state.groups?.length || Date.now() - groupsUpdatedAt >= 30000) {
+    } else if (previous !== 'ready' || Date.now() >= groupsRetryAt && (!state.groups?.length || Date.now() - groupsUpdatedAt >= 30000)) {
       if (previous !== 'ready') invalidateGroups();
       await refreshGroups();
     }

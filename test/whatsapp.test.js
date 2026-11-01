@@ -2,11 +2,38 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { WhatsApp } from '../src/whatsapp.js';
+import vm from 'node:vm';
 class Client extends EventEmitter {
   async initialize() {}
   async destroy() { this.emit('auth_failure'); this.emit('disconnected'); }
   async getChats() { return [{ id: { _serialized: '123@g.us' }, name: 'Kelas A' }]; }
 }
+test('grup tetap dimuat saat serializer getChats gagal pada chat lain', async () => {
+  const client = new Client();
+  client.getChats = async () => { throw new Error('r'); };
+  client.pupPage = { evaluate: async fn => vm.runInNewContext(`(${fn.toString()})()`, {
+    window: { require: name => {
+      assert.equal(name, 'WAWebCollections');
+      return { Chat: { getModelsArray: () => [
+        { id: { _serialized: '123@g.us' }, name: 'Kelas A' },
+        { id: { _serialized: '123@c.us' }, name: 'Pribadi' }
+      ] } };
+    } }
+  }) };
+  const bot = new WhatsApp('.', { createClient: () => client });
+  await bot.start(); client.emit('ready');
+  assert.deepEqual(await bot.groups(), [{ id: '123@g.us', name: 'Kelas A' }]);
+  await bot.stop();
+});
+test('kegagalan memuat grup menjelaskan operasi dan menyimpan penyebab asli', async () => {
+  const client = new Client();
+  const original = new Error('r');
+  client.getChats = async () => { throw original; };
+  const bot = new WhatsApp('.', { createClient: () => client });
+  await bot.start(); client.emit('ready');
+  await assert.rejects(bot.groups(), error => error.status === 503 && /grup/i.test(error.message) && error.cause === original);
+  await bot.stop();
+});
 test('grup dikenali melalui ID grup walau isGroup belum tersedia', async () => {
   const client = new Client();
   const bot = new WhatsApp('.', { createClient: () => client });
@@ -62,4 +89,27 @@ test('hasil daftar grup dari koneksi yang sudah terputus ditolak', async () => {
   await bot.stop();
   finish([{ id: { _serialized: '123@g.us' }, name: 'Grup lama' }]);
   await assert.rejects(groups, /Koneksi berubah/);
+});
+test('cleanup logout berjalan setelah browser tutup dan EBUSY bisa dicoba kembali', async () => {
+  const order = [], clients = [];
+  let strategy, locked = true;
+  const bot = new WhatsApp('.', { createClient: options => {
+    strategy = options.authStrategy;
+    strategy.cleanupAfterClose = async () => {
+      order.push('cleanup');
+      if (locked) { const error = new Error('EBUSY lockfile'); error.code = 'EBUSY'; throw error; }
+    };
+    const client = new Client();
+    client.destroy = async () => { order.push('close'); };
+    clients.push(client); return client;
+  } });
+  await bot.start(); clients[0].emit('ready');
+  await strategy.logout();
+  await assert.rejects(bot.stop(), /EBUSY/);
+  assert.deepEqual(order, ['close', 'cleanup']);
+  assert.equal(bot.snapshot().status, 'error');
+  locked = false;
+  await bot.start();
+  assert.equal(clients.length, 2);
+  await bot.stop();
 });

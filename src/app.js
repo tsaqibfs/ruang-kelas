@@ -7,7 +7,7 @@ import { equal, digest, randomToken, hashPassword, verifyPassword } from './auth
 import { cashSummary, studentDues, jakartaClock, addDays, scheduleMessage, buildReminders } from './domain.js';
 import { Scheduler } from './scheduler.js';
 
-export function createApp({ store, bot, setupToken = '', onSetup = () => {}, secureCookie = false, publicUrl = '', trustProxy = false }) {
+export function createApp({ store, bot, setupToken = '', onSetup = () => {}, secureCookie = false, publicUrl = '', trustProxy = false, logError = (...args) => console.error(...args) }) {
   const app = express();
   const db = store.db;
   const worker = new Scheduler(store, bot);
@@ -132,7 +132,7 @@ export function createApp({ store, bot, setupToken = '', onSetup = () => {}, sec
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
     const status = error instanceof InputError ? error.status : error.type === 'entity.parse.failed' ? 400 : error.status === 413 ? 413 : 500;
-    if (status === 500) console.error('Kesalahan aplikasi:', error.message);
+    if (status >= 500) logError(`Kesalahan aplikasi: ${req.method} ${req.path}`, error.stack || String(error), ...(error.cause ? ['Penyebab:', error.cause.stack || String(error.cause)] : []), ...(error.fallbackCause ? ['Jalur cadangan:', error.fallbackCause.stack || String(error.fallbackCause)] : []));
     res.status(status).json({ error: status === 500 ? 'Terjadi kesalahan server. Periksa log di RDP.' : status === 413 ? 'Data terlalu besar.' : status === 400 && error.type === 'entity.parse.failed' ? 'JSON tidak valid.' : error.message });
   });
   return app;

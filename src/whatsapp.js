@@ -3,6 +3,8 @@ import QRCode from 'qrcode';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { DeferredLocalAuth } from './local-auth.js';
+import { InputError } from './store.js';
 
 function deadline(promise, ms, label, uncertain = false) {
   let timer;
@@ -14,6 +16,7 @@ export class WhatsApp {
     this.createClient = createClient;
     this.operations = Promise.resolve();
     this.initialization = null;
+    this.authStrategy = null;
     this.dataDir = dataDir;
     this.client = null;
     this.status = 'disconnected';
@@ -45,8 +48,12 @@ export class WhatsApp {
       // initialize() may have still been launching when destroy() was first called.
       if (client.pupBrowser?.isConnected?.()) await deadline(client.destroy(), 15000, 'Browser WhatsApp belum tertutup.');
       await deadline(exited, 15000, 'Proses browser WhatsApp belum berhenti. Coba lagi.');
+      // A revoked session is removed only after Chromium releases its lockfile.
+      // Keep the strategy and client on failure so the next attempt can retry.
+      await this.authStrategy?.cleanupAfterClose();
       this.client = null;
       this.initialization = null;
+      this.authStrategy = null;
     } finally { this.stopping = false; }
   }
   async startClient() {
@@ -58,14 +65,16 @@ export class WhatsApp {
       await this.disposeClient();
       const paths = [process.env.CHROME_PATH, 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe'].filter(Boolean);
       const executablePath = paths.find(path => existsSync(path));
-      const client = this.createClient({ authStrategy: new whatsapp.LocalAuth({ dataPath: join(this.dataDir, 'whatsapp') }), puppeteer: { headless: true, ...(executablePath ? { executablePath } : {}) } });
+      const authStrategy = new DeferredLocalAuth({ dataPath: join(this.dataDir, 'whatsapp') });
+      this.authStrategy = authStrategy;
+      const client = this.createClient({ authStrategy, puppeteer: { headless: true, ...(executablePath ? { executablePath } : {}) } });
       this.client = client;
       this.status = 'starting'; this.qr = null; this.error = '';
       client.on('qr', async raw => {
-        try { const qr = await QRCode.toDataURL(raw, { width: 280, margin: 2 }); if (this.client === client && !this.stopping && this.status !== 'ready') { this.qr = qr; this.status = 'qr'; } }
+        try { const qr = await QRCode.toDataURL(raw, { width: 280, margin: 2 }); if (this.client === client && !this.stopping && !authStrategy.logoutRequested && this.status !== 'ready') { this.qr = qr; this.status = 'qr'; } }
         catch { if (this.client === client && !this.stopping) this.error = 'Gagal membuat QR. Hubungkan ulang.'; }
       });
-      client.on('ready', () => { if (this.client === client && !this.stopping) { this.status = 'ready'; this.qr = null; this.error = ''; } });
+      client.on('ready', () => { if (this.client === client && !this.stopping && !authStrategy.logoutRequested) { this.status = 'ready'; this.qr = null; this.error = ''; } });
       client.on('auth_failure', () => { if (this.client !== client || this.stopping) return; this.status = 'error'; this.qr = null; this.error = 'Autentikasi WhatsApp gagal. Hubungkan ulang dan pindai QR baru.'; });
       client.on('disconnected', () => {
         if (this.client !== client || this.stopping) return;
@@ -88,7 +97,26 @@ export class WhatsApp {
   async groups() {
     if (!this.isReady() || this.stopping) throw new Error('WhatsApp belum siap. Tunggu sampai terhubung.');
     const client = this.client;
-    const chats = await deadline(client.getChats(), 45000, 'Daftar grup belum tersedia. Coba lagi sebentar.');
+    let chats;
+    try {
+      chats = await deadline(client.getChats(), 45000, 'Daftar grup belum tersedia. Coba lagi sebentar.');
+    } catch (cause) {
+      try {
+        if (this.client !== client || !this.isReady() || this.stopping || !client.pupPage) throw cause;
+        // getChats serializes participants and last messages for every chat.
+        // The picker only needs group IDs/titles; avoid those unrelated lookups.
+        chats = await deadline(client.pupPage.evaluate(() => {
+          return window.require('WAWebCollections').Chat.getModelsArray()
+            .filter(chat => chat.id?._serialized?.endsWith('@g.us'))
+            .map(chat => ({ id: { _serialized: chat.id._serialized }, name: chat.name || chat.formattedTitle || chat.id._serialized }));
+        }), 15000, 'Pembacaan daftar grup melewati batas waktu.');
+      } catch (fallbackError) {
+        const error = new InputError('Gagal memuat daftar grup WhatsApp. Coba muat ulang grup; jika berulang, hubungkan ulang WhatsApp dan periksa log server.', 503);
+        error.cause = cause;
+        if (fallbackError !== cause) error.fallbackCause = fallbackError;
+        throw error;
+      }
+    }
     if (this.client !== client || !this.isReady() || this.stopping) throw new Error('Koneksi berubah saat memuat grup. Coba lagi.');
     const groups = new Map();
     for (const chat of chats) {
